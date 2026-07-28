@@ -14,21 +14,32 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -42,12 +53,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.image_sort_selector.ui.theme.Image_sort_selectorTheme
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +106,15 @@ class MainActivity : ComponentActivity() {
                 var moveFolderName by remember { mutableStateOf("Moved") }
                 // 一度に安全に削除・移動できる目安の枚数(これを超えたら警告を出す)
                 val safeSelectionLimit = 500
+
+                // ▼一括選択機能まわりのstate(ラジオボタンでモードを選び、「一括選択」ボタンで確定する方式)
+                var bulkSelectMode by remember { mutableStateOf("oldDate") }
+
+                // ▼サムネ拡大表示(スワイプで切り替え)まわりのstate
+                var showExpandedViewer by remember { mutableStateOf(false) }
+                var expandedGroupImages by remember { mutableStateOf<List<ImageInfo>>(emptyList()) }
+                var expandedStartIndex by remember { mutableStateOf(0) }
+
                 val filteredList = remember(infoList, threshold, valueThreshold) {
                     infoList.filter { info ->
                         info.saturation >= threshold && info.value >= valueThreshold
@@ -126,6 +149,9 @@ class MainActivity : ComponentActivity() {
                     if (hideUnmatched) groupedList.filter { it.size > 1 } else groupedList
                 }
                 val coroutineScope = rememberCoroutineScope()
+                // 画像一覧(縦方向)のスクロール状態。※3の縦スライドバーで現在位置の把握・ジャンプに使う
+                val imageListState = rememberLazyListState()
+
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { isGranted ->
@@ -214,19 +240,66 @@ class MainActivity : ComponentActivity() {
                                 valueRange = 0f..30f
                             )
 
-                            // フォルダ選択機能: 対象フォルダを絞り込みたいときに使う(何も選ばなければ全フォルダが対象)
-                            // 他のボタンと区別しやすいよう青色にしている
-                            Button(
-                                onClick = {
-                                    availableFolders = getAllFolderNames(context)
-                                },
-                                enabled = !isProcessing,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = androidx.compose.ui.graphics.Color(0xFF1E88E5),
-                                    contentColor = androidx.compose.ui.graphics.Color.White
-                                )
-                            ) {
-                                Text("フォルダ一覧を取得")
+                            // ※5 プリセットボタン: 彩度・明度・厳しさをまとめて指定の値にセットする
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                // フォルダ選択機能: 対象フォルダを絞り込みたいときに使う(何も選ばなければ全フォルダが対象)
+                                // 他のボタンと区別しやすいよう青色にしている
+                                // ※1 もう一度押すと、フォルダ一覧の表示を閉じて元の状態に戻すトグル式にした
+                                Button(
+                                    onClick = {
+                                        availableFolders = if (availableFolders.isNotEmpty()) {
+                                            emptyList()
+                                        } else {
+                                            getAllFolderNames(context)
+                                        }
+                                    },
+                                    enabled = !isProcessing,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.ui.graphics.Color(0xFF1E88E5),
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("フォルダ一覧を取得")
+                                }
+                                Button(
+                                    onClick = {
+                                        threshold = 16f
+                                        valueThreshold = 0f
+                                        phashThreshold = 9f
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.ui.graphics.Color(0xFF7E57C2),
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("プリセットA")
+                                }
+                                Button(
+                                    onClick = {
+                                        threshold = 0f
+                                        valueThreshold = 50f
+                                        phashThreshold = 8f
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.ui.graphics.Color(0xFF7E57C2),
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("プリセットB")
+                                }
+                                Button(
+                                    onClick = {
+                                        threshold = 30f
+                                        valueThreshold = 0f
+                                        phashThreshold = 15f
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.ui.graphics.Color(0xFF7E57C2),
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("プリセットC")
+                                }
                             }
                             if (availableFolders.isNotEmpty()) {
                                 Text(text = "対象フォルダ: ${selectedFolders.size}/${availableFolders.size}件選択中(0件なら全フォルダ対象)")
@@ -289,20 +362,155 @@ class MainActivity : ComponentActivity() {
                         if (infoList.isNotEmpty()) {
                             Text(text = "絞り込み結果: ${filteredList.size} / ${infoList.size} 枚(${displayedGroups.size}/${groupedList.size}グループ表示中)")
 
-                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                                Text(text = "似ている画像だけ表示")
+                            // ※表示切替(サイズ順/日付順/似ている画像だけ表示)は同じカテゴリなので緑で統一し、横一列にまとめる
+                            val displayCategoryColor = androidx.compose.ui.graphics.Color(0xFF2E7D32)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "表示切替:",
+                                    color = displayCategoryColor,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                )
+                                Button(
+                                    onClick = { sortMode = "size" },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = displayCategoryColor,
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("サイズ順")
+                                }
+                                Button(
+                                    onClick = { sortMode = "date" },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = displayCategoryColor,
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("日付順")
+                                }
+                                Text(
+                                    text = "似ている画像だけ表示",
+                                    color = displayCategoryColor,
+                                    modifier = Modifier.padding(start = 6.dp, end = 4.dp)
+                                )
                                 Switch(
                                     checked = hideUnmatched,
-                                    onCheckedChange = { hideUnmatched = it }
+                                    onCheckedChange = { hideUnmatched = it },
+                                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                                        checkedThumbColor = androidx.compose.ui.graphics.Color.White,
+                                        checkedTrackColor = displayCategoryColor
+                                    )
                                 )
                             }
 
-                            Row {
-                                Button(onClick = { sortMode = "size" }) {
-                                    Text("サイズ順")
+                            // ※4 一括選択機能: 「一括選択モード:」ラベル・確定ボタン・ラジオボタンを1行にまとめ、山吹色で統一する
+                            val bulkSelectColor = androidx.compose.ui.graphics.Color(0xFFF8B500)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "一括選択モード:",
+                                    color = bulkSelectColor,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                )
+                                Button(
+                                    onClick = {
+                                        when (bulkSelectMode) {
+                                            "oldDate" -> {
+                                                val newSelection = mutableSetOf<android.net.Uri>()
+                                                displayedGroups.forEach { group ->
+                                                    if (group.size >= 2) {
+                                                        val first = group[0]
+                                                        val second = group[1]
+                                                        val older = if (first.dateAdded <= second.dateAdded) first else second
+                                                        newSelection.add(older.uri)
+                                                    }
+                                                }
+                                                selectedUris = newSelection
+                                            }
+                                            "smallSize" -> {
+                                                val newSelection = mutableSetOf<android.net.Uri>()
+                                                displayedGroups.forEach { group ->
+                                                    if (group.size >= 2) {
+                                                        val first = group[0]
+                                                        val second = group[1]
+                                                        val smaller = if (first.sizeBytes <= second.sizeBytes) first else second
+                                                        newSelection.add(smaller.uri)
+                                                    }
+                                                }
+                                                selectedUris = newSelection
+                                            }
+                                            "allShown" -> {
+                                                selectedUris = displayedGroups.flatten().map { it.uri }.toSet()
+                                            }
+                                            "toggleAll" -> {
+                                                val allShownUris = displayedGroups.flatten().map { it.uri }.toSet()
+                                                selectedUris = if (selectedUris.isNotEmpty() && selectedUris.containsAll(allShownUris)) {
+                                                    emptySet()
+                                                } else {
+                                                    allShownUris
+                                                }
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = bulkSelectColor,
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("一括選択")
                                 }
-                                Button(onClick = { sortMode = "date" }) {
-                                    Text("日付順")
+
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = bulkSelectMode == "oldDate",
+                                        onClick = { bulkSelectMode = "oldDate" },
+                                        colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                            selectedColor = bulkSelectColor
+                                        )
+                                    )
+                                    Text(text = "古い日付", color = bulkSelectColor, fontSize = 11.sp)
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = bulkSelectMode == "smallSize",
+                                        onClick = { bulkSelectMode = "smallSize" },
+                                        colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                            selectedColor = bulkSelectColor
+                                        )
+                                    )
+                                    Text(text = "サイズ小", color = bulkSelectColor, fontSize = 11.sp)
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = bulkSelectMode == "allShown",
+                                        onClick = { bulkSelectMode = "allShown" },
+                                        colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                            selectedColor = bulkSelectColor
+                                        )
+                                    )
+                                    Text(text = "表示全て", color = bulkSelectColor, fontSize = 11.sp)
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = bulkSelectMode == "toggleAll",
+                                        onClick = { bulkSelectMode = "toggleAll" },
+                                        colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                            selectedColor = bulkSelectColor
+                                        )
+                                    )
+                                    Text(text = "全選択→解除", color = bulkSelectColor, fontSize = 11.sp)
                                 }
                             }
 
@@ -314,16 +522,21 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            // 選択移動の保存先フォルダ名を入力する欄(Pictures/ImageSortSelector/フォルダ名/ に保存される)
-                            OutlinedTextField(
-                                value = moveFolderName,
-                                onValueChange = { moveFolderName = it },
-                                label = { Text("移動先フォルダ名") },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            // 選択削除・選択移動ボタン(選択中が0枚のときは押せないようにする)
-                            Row {
+                            // ※3 選択削除・選択移動・移動先フォルダ名を「選択画像処理:」でまとめ、選択枠と同じ赤(朱色)で統一する
+                            val selectionActionColor = androidx.compose.ui.graphics.Color.Red
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "選択画像処理:",
+                                    color = selectionActionColor,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                )
                                 Button(
                                     onClick = {
                                         val pendingIntent = MediaStore.createDeleteRequest(
@@ -334,7 +547,11 @@ class MainActivity : ComponentActivity() {
                                             IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                                         )
                                     },
-                                    enabled = selectedUris.isNotEmpty()
+                                    enabled = selectedUris.isNotEmpty(),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = selectionActionColor,
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
                                 ) {
                                     Text("選択削除 (${selectedUris.size})")
                                 }
@@ -348,55 +565,151 @@ class MainActivity : ComponentActivity() {
                                             IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                                         )
                                     },
-                                    enabled = selectedUris.isNotEmpty()
+                                    enabled = selectedUris.isNotEmpty(),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = selectionActionColor,
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
                                 ) {
                                     Text("選択移動 → ${moveFolderName.ifBlank { "Moved" }} (${selectedUris.size})")
                                 }
+                                // 選択移動の保存先フォルダ名を入力する欄(Pictures/ImageSortSelector/フォルダ名/ に保存される)
+                                OutlinedTextField(
+                                    value = moveFolderName,
+                                    onValueChange = { moveFolderName = it },
+                                    label = { Text("移動先フォルダ名") },
+                                    singleLine = true,
+                                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = selectionActionColor,
+                                        unfocusedBorderColor = selectionActionColor,
+                                        focusedLabelColor = selectionActionColor,
+                                        unfocusedLabelColor = selectionActionColor,
+                                        cursorColor = selectionActionColor
+                                    ),
+                                    modifier = Modifier.width(180.dp)
+                                )
                             }
 
-                            LazyColumn {
-                                items(displayedGroups) { group ->
-                                    LazyRow {
-                                        items(group) { info ->
-                                            Column(
-                                                modifier = Modifier.padding(4.dp),
-                                                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                            // ※2 サムネ拡大表示・※3 縦スライドバー:
+                            // 画像一覧(LazyColumn)の右に、現在のスクロール位置を示す縦バーを並べて表示する
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                LazyColumn(
+                                    state = imageListState,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    items(displayedGroups) { group ->
+                                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                            // ※2 グループの左端に拡大ボタンを設置。押すとこの行のサムネ全てをスワイプで拡大表示できる
+                                            Button(
+                                                onClick = {
+                                                    expandedGroupImages = group
+                                                    expandedStartIndex = 0
+                                                    showExpandedViewer = true
+                                                },
+                                                contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                                                modifier = Modifier.padding(4.dp)
                                             ) {
-                                                val isSelected = selectedUris.contains(info.uri)
-                                                Box {
-                                                    AsyncImage(
-                                                        model = info.uri,
-                                                        contentDescription = null,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier
-                                                            .size(100.dp)
-                                                            .border(
-                                                                width = if (isSelected) 3.dp else 0.dp,
-                                                                color = if (isSelected) androidx.compose.ui.graphics.Color.Red else androidx.compose.ui.graphics.Color.Transparent
+                                                Text("🔍")
+                                            }
+                                            LazyRow {
+                                                items(group) { info ->
+                                                    Column(
+                                                        modifier = Modifier.padding(4.dp),
+                                                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                                                    ) {
+                                                        val isSelected = selectedUris.contains(info.uri)
+                                                        Box {
+                                                            AsyncImage(
+                                                                model = info.uri,
+                                                                contentDescription = null,
+                                                                contentScale = ContentScale.Crop,
+                                                                modifier = Modifier
+                                                                    .size(100.dp)
+                                                                    .border(
+                                                                        width = if (isSelected) 3.dp else 0.dp,
+                                                                        color = if (isSelected) androidx.compose.ui.graphics.Color.Red else androidx.compose.ui.graphics.Color.Transparent
+                                                                    )
+                                                                    .clickable {
+                                                                        selectedUris = if (isSelected) {
+                                                                            selectedUris - info.uri
+                                                                        } else {
+                                                                            selectedUris + info.uri
+                                                                        }
+                                                                    }
                                                             )
-                                                            .clickable {
-                                                                selectedUris = if (isSelected) {
-                                                                    selectedUris - info.uri
-                                                                } else {
-                                                                    selectedUris + info.uri
-                                                                }
+                                                            if (isSelected) {
+                                                                Text(
+                                                                    text = "✓",
+                                                                    color = androidx.compose.ui.graphics.Color.White,
+                                                                    modifier = Modifier
+                                                                        .align(androidx.compose.ui.Alignment.TopEnd)
+                                                                        .background(androidx.compose.ui.graphics.Color.Red)
+                                                                        .padding(2.dp)
+                                                                )
                                                             }
-                                                    )
-                                                    if (isSelected) {
-                                                        Text(
-                                                            text = "✓",
-                                                            color = androidx.compose.ui.graphics.Color.White,
-                                                            modifier = Modifier
-                                                                .align(androidx.compose.ui.Alignment.TopEnd)
-                                                                .background(androidx.compose.ui.graphics.Color.Red)
-                                                                .padding(2.dp)
-                                                        )
+                                                        }
+                                                        Text(text = formatFileSize(info.sizeBytes), fontSize = 10.sp)
+                                                        Text(text = formatDate(info.dateAdded), fontSize = 10.sp)
                                                     }
                                                 }
-                                                Text(text = formatFileSize(info.sizeBytes), fontSize = 10.sp)
-                                                Text(text = formatDate(info.dateAdded), fontSize = 10.sp)
-                                            }                                        }
-                                    }                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ※3 縦スライドバー: 画像一覧の現在のスクロール位置をパーセントで示し、ドラッグでジャンプできる
+                                val totalGroups = displayedGroups.size
+                                BoxWithConstraints(
+                                    modifier = Modifier
+                                        .width(28.dp)
+                                        .fillMaxHeight()
+                                        .pointerInput(totalGroups) {
+                                            detectDragGestures { change, _ ->
+                                                change.consume()
+                                                if (totalGroups > 1) {
+                                                    val fraction = (change.position.y / size.height).coerceIn(0f, 1f)
+                                                    val targetIndex = (fraction * (totalGroups - 1)).toInt()
+                                                        .coerceIn(0, totalGroups - 1)
+                                                    coroutineScope.launch { imageListState.scrollToItem(targetIndex) }
+                                                }
+                                            }
+                                        }
+                                ) {
+                                    val trackHeightDp = maxHeight
+                                    val thumbHeightDp = 40.dp
+                                    val scrollFraction = if (totalGroups > 1) {
+                                        (imageListState.firstVisibleItemIndex.toFloat() / (totalGroups - 1).toFloat())
+                                            .coerceIn(0f, 1f)
+                                    } else 0f
+                                    val thumbOffsetDp = (trackHeightDp - thumbHeightDp).coerceAtLeast(0.dp) * scrollFraction
+
+                                    // 背景の縦トラック
+                                    Box(
+                                        modifier = Modifier
+                                            .align(androidx.compose.ui.Alignment.Center)
+                                            .width(4.dp)
+                                            .fillMaxHeight()
+                                            .background(androidx.compose.ui.graphics.Color(0xFFE0E0E0))
+                                    )
+                                    // 現在位置を示すつまみ
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(top = thumbOffsetDp)
+                                            .align(androidx.compose.ui.Alignment.TopCenter)
+                                            .width(24.dp)
+                                            .height(thumbHeightDp)
+                                            .background(
+                                                androidx.compose.ui.graphics.Color(0xFF7E57C2),
+                                                RoundedCornerShape(4.dp)
+                                            )
+                                    )
+                                    // 現在位置のパーセント表示
+                                    Text(
+                                        text = "${(scrollFraction * 100).toInt()}%",
+                                        fontSize = 8.sp,
+                                        modifier = Modifier.align(androidx.compose.ui.Alignment.BottomCenter)
+                                    )
+                                }
                             }
                         }
 
@@ -418,6 +731,77 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // ※2 サムネ拡大表示: 全画面ダイアログでHorizontalPagerを使い、左右スワイプで画像を切り替える
+                // 画像をタップすると選択/解除がトグルされ(拡大表示のままにする)、削除・移動の選択と共有される
+                if (showExpandedViewer && expandedGroupImages.isNotEmpty()) {
+                    Dialog(
+                        onDismissRequest = { showExpandedViewer = false },
+                        properties = DialogProperties(usePlatformDefaultWidth = false)
+                    ) {
+                        val pagerState = rememberPagerState(initialPage = expandedStartIndex) {
+                            expandedGroupImages.size
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(androidx.compose.ui.graphics.Color.Black)
+                        ) {
+                            HorizontalPager(
+                                state = pagerState,
+                                modifier = Modifier.fillMaxSize()
+                            ) { page ->
+                                val info = expandedGroupImages[page]
+                                val isSelected = selectedUris.contains(info.uri)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clickable {
+                                            selectedUris = if (isSelected) {
+                                                selectedUris - info.uri
+                                            } else {
+                                                selectedUris + info.uri
+                                            }
+                                        },
+                                    contentAlignment = androidx.compose.ui.Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = info.uri,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (isSelected) {
+                                        Text(
+                                            text = "✓ 選択中",
+                                            color = androidx.compose.ui.graphics.Color.White,
+                                            fontSize = 20.sp,
+                                            modifier = Modifier
+                                                .align(androidx.compose.ui.Alignment.TopEnd)
+                                                .background(androidx.compose.ui.graphics.Color.Red)
+                                                .padding(8.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Button(
+                                onClick = { showExpandedViewer = false },
+                                modifier = Modifier
+                                    .align(androidx.compose.ui.Alignment.TopStart)
+                                    .padding(16.dp)
+                            ) {
+                                Text("閉じる")
+                            }
+                            Text(
+                                text = "${pagerState.currentPage + 1} / ${expandedGroupImages.size}",
+                                color = androidx.compose.ui.graphics.Color.White,
+                                modifier = Modifier
+                                    .align(androidx.compose.ui.Alignment.TopEnd)
+                                    .padding(16.dp)
+                            )
                         }
                     }
                 }
