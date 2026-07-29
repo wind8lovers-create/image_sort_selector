@@ -2,7 +2,9 @@ package com.example.image_sort_selector
 
 import android.Manifest
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -115,6 +117,14 @@ class MainActivity : ComponentActivity() {
                 var expandedGroupImages by remember { mutableStateOf<List<ImageInfo>>(emptyList()) }
                 var expandedStartIndex by remember { mutableStateOf(0) }
 
+                // ▼書庫(ZIP)モードまわりのstate
+                // "normal"=通常のギャラリー画像を対象、"archive"=ZIP書庫を展開して対象にする
+                var appMode by remember { mutableStateOf("normal") }
+                var availableArchives by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
+                var selectedArchiveFile by remember { mutableStateOf<java.io.File?>(null) }
+                // 選択したZIPを展開した先の一時フォルダ。「書庫を保存」を押すとここから再圧縮する
+                var archiveWorkDir by remember { mutableStateOf<java.io.File?>(null) }
+
                 val filteredList = remember(infoList, threshold, valueThreshold) {
                     infoList.filter { info ->
                         info.saturation >= threshold && info.value >= valueThreshold
@@ -164,6 +174,14 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(Unit) {
                     permissionLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
+                }
+
+                // 書庫(ZIP)モードで端末内のZIPファイルを横断検索するには「全ファイルへのアクセス」許可が必要。
+                // 通常の許可ダイアログは出せないため、設定画面を開いてユーザーに手動でONにしてもらう
+                val allFilesAccessLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) {
+                    // 設定画面から戻ってきたタイミングでは特に何もしない(再度ボタンを押してもらう)
                 }
 
                 // 処理中(isProcessing=true)の間だけ画面が自動で暗くならないようにする
@@ -247,10 +265,33 @@ class MainActivity : ComponentActivity() {
                                 // ※1 もう一度押すと、フォルダ一覧の表示を閉じて元の状態に戻すトグル式にした
                                 Button(
                                     onClick = {
-                                        availableFolders = if (availableFolders.isNotEmpty()) {
-                                            emptyList()
+                                        if (appMode == "normal") {
+                                            availableFolders = if (availableFolders.isNotEmpty()) {
+                                                emptyList()
+                                            } else {
+                                                getAllFolderNames(context)
+                                            }
                                         } else {
-                                            getAllFolderNames(context)
+                                            if (!hasAllFilesAccess()) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "「全ファイルへのアクセス」の許可が必要です。設定画面でONにしてください",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                                val intent = android.content.Intent(
+                                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                                    android.net.Uri.parse("package:${context.packageName}")
+                                                )
+                                                allFilesAccessLauncher.launch(intent)
+                                            } else {
+                                                availableArchives = if (availableArchives.isNotEmpty()) {
+                                                    emptyList()
+                                                } else {
+                                                    val found = mutableListOf<java.io.File>()
+                                                    findZipFiles(Environment.getExternalStorageDirectory(), found)
+                                                    found.sortedByDescending { it.lastModified() }
+                                                }
+                                            }
                                         }
                                     },
                                     enabled = !isProcessing,
@@ -259,7 +300,7 @@ class MainActivity : ComponentActivity() {
                                         contentColor = androidx.compose.ui.graphics.Color.White
                                     )
                                 ) {
-                                    Text("フォルダ一覧を取得")
+                                    Text(if (appMode == "normal") "フォルダ一覧を取得" else "書庫ファイルを取得")
                                 }
                                 Button(
                                     onClick = {
@@ -301,59 +342,138 @@ class MainActivity : ComponentActivity() {
                                     Text("プリセットC")
                                 }
                             }
-                            if (availableFolders.isNotEmpty()) {
-                                Text(text = "対象フォルダ: ${selectedFolders.size}/${availableFolders.size}件選択中(0件なら全フォルダ対象)")
-                                LazyColumn(modifier = Modifier.height(150.dp)) {
-                                    items(availableFolders) { folder ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    selectedFolders = if (selectedFolders.contains(folder)) {
-                                                        selectedFolders - folder
-                                                    } else {
-                                                        selectedFolders + folder
+                            if (appMode == "normal") {
+                                if (availableFolders.isNotEmpty()) {
+                                    Text(text = "対象フォルダ: ${selectedFolders.size}/${availableFolders.size}件選択中(0件なら全フォルダ対象)")
+                                    LazyColumn(modifier = Modifier.height(150.dp)) {
+                                        items(availableFolders) { folder ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        selectedFolders = if (selectedFolders.contains(folder)) {
+                                                            selectedFolders - folder
+                                                        } else {
+                                                            selectedFolders + folder
+                                                        }
+                                                    },
+                                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                            ) {
+                                                Checkbox(
+                                                    checked = selectedFolders.contains(folder),
+                                                    onCheckedChange = { checked ->
+                                                        selectedFolders = if (checked) {
+                                                            selectedFolders + folder
+                                                        } else {
+                                                            selectedFolders - folder
+                                                        }
                                                     }
-                                                },
-                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                        ) {
-                                            Checkbox(
-                                                checked = selectedFolders.contains(folder),
-                                                onCheckedChange = { checked ->
-                                                    selectedFolders = if (checked) {
-                                                        selectedFolders + folder
-                                                    } else {
-                                                        selectedFolders - folder
-                                                    }
-                                                }
-                                            )
-                                            Text(text = folder)
+                                                )
+                                                Text(text = folder)
+                                            }
                                         }
                                     }
+                                }
+                            } else {
+                                // 書庫モード: 見つかったZIPファイルを1件だけ選べるリスト(ラジオボタン形式)で表示する
+                                if (availableArchives.isNotEmpty()) {
+                                    Text(text = "書庫ファイル一覧: ${availableArchives.size}件(タップで1つ選択)")
+                                    LazyColumn(modifier = Modifier.height(150.dp)) {
+                                        items(availableArchives) { zipFile ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { selectedArchiveFile = zipFile },
+                                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                            ) {
+                                                RadioButton(
+                                                    selected = selectedArchiveFile == zipFile,
+                                                    onClick = { selectedArchiveFile = zipFile }
+                                                )
+                                                Column {
+                                                    Text(text = zipFile.name)
+                                                    Text(
+                                                        text = zipFile.parent ?: "",
+                                                        fontSize = 10.sp,
+                                                        color = androidx.compose.ui.graphics.Color.Gray
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                selectedArchiveFile?.let { selected ->
+                                    Text(text = "選択中の書庫: ${selected.name}")
                                 }
                             }
                         }
 
-                        Button(
-                            onClick = {
-                                isProcessing = true
-                                progressText = "情報収集中..."
-                                coroutineScope.launch {
-                                    val collected = withContext(Dispatchers.IO) {
-                                        collectAllImageInfo(context, selectedFolders) { current, total ->
-                                            withContext(Dispatchers.Main) {
-                                                progressText = "$current / $total 枚 情報収集中..."
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Button(
+                                onClick = {
+                                    if (appMode == "normal") {
+                                        isProcessing = true
+                                        progressText = "情報収集中..."
+                                        coroutineScope.launch {
+                                            val collected = withContext(Dispatchers.IO) {
+                                                collectAllImageInfo(context, selectedFolders) { current, total ->
+                                                    withContext(Dispatchers.Main) {
+                                                        progressText = "$current / $total 枚 情報収集中..."
+                                                    }
+                                                }
+                                            }
+                                            infoList = collected
+                                            progressText = "情報収集完了! ${collected.size}枚"
+                                            isProcessing = false
+                                        }
+                                    } else {
+                                        val zipFile = selectedArchiveFile
+                                        if (zipFile == null) {
+                                            Toast.makeText(context, "書庫ファイルを選択してください", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            isProcessing = true
+                                            progressText = "書庫を展開中..."
+                                            coroutineScope.launch {
+                                                val workDir = withContext(Dispatchers.IO) {
+                                                    extractZipToWorkDir(context, zipFile)
+                                                }
+                                                archiveWorkDir = workDir
+                                                progressText = "情報収集中..."
+                                                val collected = withContext(Dispatchers.IO) {
+                                                    collectImageInfoFromDir(context, workDir) { current, total ->
+                                                        withContext(Dispatchers.Main) {
+                                                            progressText = "$current / $total 枚 情報収集中..."
+                                                        }
+                                                    }
+                                                }
+                                                infoList = collected
+                                                progressText = "書庫展開・情報収集完了! ${collected.size}枚"
+                                                isProcessing = false
                                             }
                                         }
                                     }
-                                    infoList = collected
-                                    progressText = "情報収集完了! ${collected.size}枚"
-                                    isProcessing = false
+                                },
+                                enabled = !isProcessing
+                            ) {
+                                Text("画像情報読み込み")
+                            }
+
+                            Text(text = "通常モード", modifier = Modifier.padding(start = 12.dp, end = 4.dp))
+                            Switch(
+                                checked = appMode == "archive",
+                                onCheckedChange = { checked ->
+                                    appMode = if (checked) "archive" else "normal"
+                                    // モードが切り替わったら前の一覧・選択状態をリセットする
+                                    infoList = emptyList()
+                                    selectedUris = emptySet()
+                                    availableFolders = emptyList()
+                                    availableArchives = emptyList()
+                                    selectedArchiveFile = null
+                                    archiveWorkDir = null
+                                    progressText = ""
                                 }
-                            },
-                            enabled = !isProcessing
-                        ) {
-                            Text("画像情報読み込み")
+                            )
+                            Text(text = "書庫モード", modifier = Modifier.padding(start = 4.dp))
                         }
 
                         if (progressText.isNotEmpty()) {
@@ -539,13 +659,24 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Button(
                                     onClick = {
-                                        val pendingIntent = MediaStore.createDeleteRequest(
-                                            context.contentResolver,
-                                            selectedUris.toList()
-                                        )
-                                        deleteLauncher.launch(
-                                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                                        )
+                                        if (appMode == "normal") {
+                                            val pendingIntent = MediaStore.createDeleteRequest(
+                                                context.contentResolver,
+                                                selectedUris.toList()
+                                            )
+                                            deleteLauncher.launch(
+                                                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                                            )
+                                        } else {
+                                            // 書庫モード: 展開先の一時ファイルをその場で削除する(システム確認ダイアログは不要)
+                                            // 元のZIPは「書庫を保存」を押すまで変更されない
+                                            selectedUris.forEach { uri ->
+                                                uri.path?.let { path -> java.io.File(path).delete() }
+                                            }
+                                            infoList = infoList.filter { !selectedUris.contains(it.uri) }
+                                            selectedUris = emptySet()
+                                            Toast.makeText(context, "書庫内から削除しました(「書庫を保存」で確定します)", Toast.LENGTH_SHORT).show()
+                                        }
                                     },
                                     enabled = selectedUris.isNotEmpty(),
                                     colors = ButtonDefaults.buttonColors(
@@ -557,13 +688,28 @@ class MainActivity : ComponentActivity() {
                                 }
                                 Button(
                                     onClick = {
-                                        val pendingIntent = MediaStore.createWriteRequest(
-                                            context.contentResolver,
-                                            selectedUris.toList()
-                                        )
-                                        moveLauncher.launch(
-                                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                                        )
+                                        if (appMode == "normal") {
+                                            val pendingIntent = MediaStore.createWriteRequest(
+                                                context.contentResolver,
+                                                selectedUris.toList()
+                                            )
+                                            moveLauncher.launch(
+                                                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                                            )
+                                        } else {
+                                            // 書庫モード:「選択移動」は書庫の外(端末の通常のPicturesフォルダ)へコピーし、
+                                            // 展開先の一時ファイルからは削除する
+                                            val urisToMove = selectedUris.toList()
+                                            val folderNameForMove = moveFolderName.ifBlank { "Moved" }
+                                            coroutineScope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    moveExtractedFilesToNormalFolder(context, urisToMove, folderNameForMove)
+                                                }
+                                                infoList = infoList.filter { !selectedUris.contains(it.uri) }
+                                                selectedUris = emptySet()
+                                                Toast.makeText(context, "書庫の外「$folderNameForMove」へ移動しました", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
                                     },
                                     enabled = selectedUris.isNotEmpty(),
                                     colors = ButtonDefaults.buttonColors(
@@ -588,6 +734,41 @@ class MainActivity : ComponentActivity() {
                                     ),
                                     modifier = Modifier.width(180.dp)
                                 )
+                            }
+
+                            // 書庫モードのときだけ表示。展開先に残っている画像だけを、元のZIPへ上書き圧縮する
+                            if (appMode == "archive" && archiveWorkDir != null) {
+                                Button(
+                                    onClick = {
+                                        val workDir = archiveWorkDir
+                                        val zipFile = selectedArchiveFile
+                                        if (workDir != null && zipFile != null) {
+                                            isProcessing = true
+                                            progressText = "書庫を再圧縮中..."
+                                            coroutineScope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    rezipWorkDirToFile(workDir, zipFile)
+                                                    workDir.deleteRecursively()
+                                                }
+                                                archiveWorkDir = null
+                                                infoList = emptyList()
+                                                selectedUris = emptySet()
+                                                availableArchives = emptyList()
+                                                progressText = "書庫を更新しました: ${zipFile.name}"
+                                                isProcessing = false
+                                                Toast.makeText(context, "「${zipFile.name}」を更新しました", Toast.LENGTH_LONG).show()
+                                                selectedArchiveFile = null
+                                            }
+                                        }
+                                    },
+                                    enabled = !isProcessing,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.ui.graphics.Color(0xFF00897B),
+                                        contentColor = androidx.compose.ui.graphics.Color.White
+                                    )
+                                ) {
+                                    Text("書庫を保存(上書き圧縮)")
+                                }
                             }
 
                             // ※2 サムネ拡大表示・※3 縦スライドバー:
@@ -1100,6 +1281,152 @@ class MainActivity : ComponentActivity() {
                 Log.d("ImageSortSelector", "移動失敗: ${e.message}")
             }
         }
+    }
+
+    // ============ ここから書庫(ZIP)モード用の関数 ============
+
+    // Android 11以降のスコープドストレージ下で、端末内のZIPファイルを横断検索するには
+    // 「全ファイルへのアクセス」(MANAGE_EXTERNAL_STORAGE)の許可が必要
+    private fun hasAllFilesAccess(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    // 指定フォルダ以下を再帰的にたどり、拡張子が.zipのファイルをresultsに集める
+    private fun findZipFiles(root: java.io.File, results: MutableList<java.io.File>, depthLimit: Int = 8) {
+        if (depthLimit <= 0) return
+        val children = root.listFiles() ?: return
+        for (child in children) {
+            if (child.isDirectory) {
+                // Android/data や Android/obb はアクセス制限や無関係なファイルが多いのでスキップする
+                if (child.name == "Android") continue
+                findZipFiles(child, results, depthLimit - 1)
+            } else if (child.name.endsWith(".zip", ignoreCase = true)) {
+                results.add(child)
+            }
+        }
+    }
+
+    // 選択したZIPファイルをアプリの一時フォルダ(cacheDir/archive_work)に展開する。
+    // 展開先は毎回クリアしてから使う(前回の書庫の残骸が混ざらないようにするため)
+    private fun extractZipToWorkDir(context: android.content.Context, zipFile: java.io.File): java.io.File {
+        val workDir = java.io.File(context.cacheDir, "archive_work")
+        if (workDir.exists()) workDir.deleteRecursively()
+        workDir.mkdirs()
+
+        java.util.zip.ZipInputStream(java.io.BufferedInputStream(java.io.FileInputStream(zipFile))).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val outFile = java.io.File(workDir, entry.name)
+                if (entry.isDirectory) {
+                    outFile.mkdirs()
+                } else {
+                    outFile.parentFile?.mkdirs()
+                    java.io.FileOutputStream(outFile).use { fos ->
+                        zis.copyTo(fos)
+                    }
+                }
+                zis.closeEntry()
+                entry = zis.nextEntry
+            }
+        }
+        return workDir
+    }
+
+    // 展開した一時フォルダ内の画像ファイルを集めて、通常モードと同じImageInfoの形にする
+    // (collectImageInfoは中でcontentResolver経由でuriを開くため、file://のUriもそのまま使い回せる)
+    private suspend fun collectImageInfoFromDir(
+        context: android.content.Context,
+        dir: java.io.File,
+        onProgress: suspend (Int, Int) -> Unit
+    ): List<ImageInfo> {
+        val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
+        val files = dir.walkTopDown().filter { it.isFile && it.extension.lowercase() in imageExtensions }.toList()
+        val infoList = mutableListOf<ImageInfo>()
+        val total = files.size
+        var count = 0
+        files.forEach { file ->
+            val uri = android.net.Uri.fromFile(file)
+            val info = collectImageInfo(context, uri, file.name, file.lastModified() / 1000, file.length())
+            if (info != null) {
+                infoList.add(info)
+            }
+            count++
+            onProgress(count, total)
+        }
+        return infoList
+    }
+
+    // 書庫モードの「選択移動」: 展開先の一時ファイルを、書庫の外(通常のPictures/ImageSortSelector/フォルダ名/)へ
+    // MediaStore経由でコピーし、コピーが成功したら展開先の一時ファイルは削除する
+    private fun moveExtractedFilesToNormalFolder(
+        context: android.content.Context,
+        uris: List<android.net.Uri>,
+        folderName: String
+    ) {
+        uris.forEach { uri ->
+            val path = uri.path ?: return@forEach
+            val file = java.io.File(path)
+            if (!file.exists()) return@forEach
+
+            val mimeType = when (file.extension.lowercase()) {
+                "png" -> "image/png"
+                "webp" -> "image/webp"
+                else -> "image/jpeg"
+            }
+            val contentValues = android.content.ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+                put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ImageSortSelector/$folderName")
+            }
+            try {
+                val newUri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                if (newUri != null) {
+                    context.contentResolver.openOutputStream(newUri)?.use { out ->
+                        java.io.FileInputStream(file).use { inStream ->
+                            inStream.copyTo(out)
+                        }
+                    }
+                    file.delete()
+                } else {
+                    Log.d("ImageSortSelector", "${file.name}: URIの発行に失敗")
+                }
+            } catch (e: Exception) {
+                Log.d("ImageSortSelector", "書庫内画像の移動失敗(${file.name}): ${e.message}")
+            }
+        }
+    }
+
+    // 展開先フォルダに残っている画像だけを使って、元のZIPファイルに上書き圧縮する。
+    // 一旦別名の一時ZIPを作ってから置き換えることで、圧縮中に失敗しても元のZIPを壊さないようにしている
+    private fun rezipWorkDirToFile(workDir: java.io.File, targetZipFile: java.io.File) {
+        val tempZip = java.io.File(targetZipFile.parentFile, "${targetZipFile.nameWithoutExtension}_tmp_${System.currentTimeMillis()}.zip")
+        val basePath = workDir.absolutePath
+
+        java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(tempZip))).use { zos ->
+            workDir.walkTopDown().forEach { file ->
+                if (file.isFile) {
+                    val relativePath = file.absolutePath
+                        .removePrefix(basePath)
+                        .trimStart('/', '\\')
+                        .replace('\\', '/')
+                    if (relativePath.isNotEmpty()) {
+                        val entry = java.util.zip.ZipEntry(relativePath)
+                        zos.putNextEntry(entry)
+                        java.io.FileInputStream(file).use { it.copyTo(zos) }
+                        zos.closeEntry()
+                    }
+                }
+            }
+        }
+
+        if (targetZipFile.exists()) {
+            targetZipFile.delete()
+        }
+        tempZip.renameTo(targetZipFile)
     }
 }
 
